@@ -34,6 +34,15 @@
 	#warning "KEYNAMING_HID has been renamed KEYNAMING_ENABLE_HID."
 #endif
 
+#if !( defined(MAC_OS_X_VERSION_10_5) && (MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_5) )
+/* KeyboardLayout was introduced in 10.2 and deprecated in 10.5. If we might run on a pre-10.5 system, include it. */
+#define KEYNAMING_USE_KCHR
+#endif
+
+#if defined(MAC_OS_X_VERSION_10_5) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5)
+/* TIS was introduced in 10.5. If we might run on 10.5 or later, include it. */
+#define KEYNAMING_USE_TIS
+#endif
 
 #pragma mark * Constants
 
@@ -390,21 +399,24 @@ enum
 */
 typedef struct StateCache
 {
+#ifdef KEYNAMING_USE_KCHR
 	Ptr					KCHR;			/* Old-style keyboard mapping for KeyTranslate() */
-	UCKeyboardLayout	*uchr;			/* New-style keyboard mapping for UCKeyTranslate() */
 	TextEncoding		encoding;		/* Encoding for converting KeyTranslate() chars to CFString */
+#endif
+	UCKeyboardLayout	*uchr;			/* New-style keyboard mapping for UCKeyTranslate() */
 	uint8_t				keyboardType;	/* Magic Number needed by UCKeyTranslate() */
+#ifdef KEYNAMING_USE_TIS
+    CFDataRef			uchrData;		/* Reference-counted buffer holding the 'uchr' data */
+#endif
 } StateCache;
 
 
-static void InitStateCache(StateCache *outState)
+static Boolean InitStateCache(StateCache *outState)
 {
 	Boolean				doneWithKL = false;
-	KeyboardLayoutRef	layout;
-	Handle				rsrc;
-	ResID				keyLayoutID;
-	SInt16				keyScript;
-	
+
+	bzero(outState, sizeof(*outState));
+
 	if (NULL == sStringTable)
 	{
 		sStringTable = CFSTR("KeyNaming");
@@ -416,22 +428,44 @@ static void InitStateCache(StateCache *outState)
 		CFRetain(sStringBundle);
 	}
 	
-	if (NULL != KLGetCurrentKeyboardLayout)
+#ifdef KEYNAMING_USE_TIS
+	if (!doneWithKL && NULL != TISCopyCurrentKeyboardInputSource) {
+		TISInputSourceRef inputSource = TISCopyCurrentKeyboardInputSource();
+		
+		if (!outState->uchrData) {
+			CFDataRef uchrKeyboardLayout = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData);
+			outState->uchrData = CFDataCreateCopy(kCFAllocatorDefault, uchrKeyboardLayout);
+			outState->uchr = (UCKeyboardLayout	*)CFDataGetBytePtr(outState->uchrData);
+		}
+
+		CFRelease(inputSource);
+
+		doneWithKL = true;
+	}
+#endif
+
+#ifdef KEYNAMING_USE_KCHR
+	if (!doneWithKL && NULL != KLGetCurrentKeyboardLayout)
 	{
+		KeyboardLayoutRef	layout;
+
 		/* Mac OS X 10.2 Keyboard Layout Services */
 		if (!KLGetCurrentKeyboardLayout(&layout))
 		{
 			KLGetKeyboardLayoutProperty(layout, kKLKCHRData, (const void **)&outState->KCHR);
 			KLGetKeyboardLayoutProperty(layout, kKLuchrData, (const void **)&outState->uchr);
 			
-			if (!outState->KCHR) outState->KCHR = (Ptr)GetScriptManagerVariable(smKCHRCache);
-			
-			doneWithKL = true;
+			if (outState->KCHR != NULL)
+				doneWithKL = true;
 		}
 	}
-	
+
 	if (!doneWithKL)
 	{
+        Handle				rsrc;
+        ResID				keyLayoutID;
+        SInt16				keyScript;
+
 		outState->KCHR = (Ptr)GetScriptManagerVariable(smKCHRCache);
 		
 		/* See IM:Supporting Unicode Input */
@@ -442,8 +476,21 @@ static void InitStateCache(StateCache *outState)
 		/* It's OK if this is NULL, we'll fall back on KeyTranslate */
 		outState->uchr = *(UCKeyboardLayout	**)rsrc;
 	}
+
 	outState->encoding = CreateTextEncoding(GetScriptManagerVariable(smKeyScript), kTextEncodingDefaultVariant, kTextEncodingDefaultFormat);
+#endif
+
 	outState->keyboardType = LMGetKbdType();
+    
+    return doneWithKL;
+}
+
+static void DestroyStateCache(StateCache *outState)
+{
+#ifdef KEYNAMING_USE_TIS
+	CFRelease(outState->uchrData);
+#endif
+	bzero(outState, sizeof(*outState));
 }
 
 
@@ -460,6 +507,7 @@ CFStringRef KeyNamingCopyOneKeyName(uint16_t inVirtualKeyCode)
 	
 	InitStateCache(&state);
 	err = NameOneKey(inVirtualKeyCode, &result, &state, NULL);
+	DestroyStateCache(&state);
 	
 	if (err && NULL != result)
 	{
@@ -489,8 +537,6 @@ CFStringRef KeyNamingCopyKeyNames(uint32_t inCount, const uint16_t * const inVir
 	
 	for (iter = 0; iter != inCount; ++iter)
 	{
-        CFStringRef			curr;
-
 		if (0 != iter)
 		{
 			CFStringAppend(result, kSeparator);
@@ -502,6 +548,8 @@ CFStringRef KeyNamingCopyKeyNames(uint32_t inCount, const uint16_t * const inVir
 		CFStringAppend(result, curr);
 		CFRelease(curr);
 	}
+
+	DestroyStateCache(&state);
 	
 	if (err && NULL != result)
 	{
@@ -537,6 +585,8 @@ CFArrayRef KeyNamingCopyKeyNamesAsArray(uint32_t inCount, const uint16_t * const
 		CFArrayAppendValue(result, curr);
 		CFRelease(curr);
 	}
+    
+	DestroyStateCache(&state);
 	
 	if (err && NULL != result)
 	{
@@ -566,6 +616,7 @@ CFStringRef KeyNamingCopyOneKeyNameHID(int32_t inUsage)
 	{
 		InitStateCache(&state);
 		err = NameOneKey(vkc, &result, &state, NULL);
+		DestroyStateCache(&state);
 		
 		if (err && NULL != result)
 		{
@@ -602,6 +653,8 @@ CFStringRef KeyNamingCopyKeyNamesHID(uint32_t inCount, const int32_t * const inU
 	
 	for (iter = 0; iter != inCount; ++iter)
 	{
+        CFStringRef			curr;
+
 		if (0 != iter)
 		{
 			CFStringAppend(result, kSeparator);
@@ -635,6 +688,8 @@ CFStringRef KeyNamingCopyKeyNamesHID(uint32_t inCount, const int32_t * const inU
 			CFRelease(curr);
 		}
 	}
+    
+	DestroyStateCache(&state);
 	
 	if (err && NULL != result)
 	{
@@ -695,7 +750,9 @@ CFArrayRef KeyNamingCopyKeyNamesAsArrayHID(uint32_t inCount, const int32_t * con
 			CFRelease(curr);
 		}
 	}
-	
+
+	DestroyStateCache(&state);
+
 	if (err && NULL != result)
 	{
 		CFRelease(result);
@@ -711,27 +768,29 @@ CFArrayRef KeyNamingCopyKeyNamesAsArrayHID(uint32_t inCount, const int32_t * con
 static OSStatus NameOneKey(uint16_t inVKeyCode, CFStringRef *outString, const StateCache *inState, uint8_t *outHandlingMode)
 {
 	enum { kLength = 255 };
-	UInt32				state,
-						value;
+	UInt32				state;
 	OSStatus			err = noErr;
 	UInt8				charCode;
 	CFStringRef			special = NULL;
 	UInt16				handlingMode = kNoSpecialHandling;
 	CFStringRef			result = NULL;
 	CFMutableStringRef	tempStr;
-	UniChar				string[kLength];
-	UniCharCount		length;
-	UInt8				pascalString[2];
 	
 	/*	Sanity checking is the responsibility of the caller. */
 	
 	/*	Get the character code */
 	state = 0;
-	value = KeyTranslate(inState->KCHR, inVKeyCode, &state);
-	/*	Magic for dead keys (combining accent keys) */
-	if (!value) value = KeyTranslate(inState->KCHR, inVKeyCode, &state);
-	
-	charCode = value & 0xFF;
+	charCode = 0;
+
+#ifdef KEYNAMING_USE_KCHR
+	if (inState->KCHR != NULL) {
+		UInt32 value = KeyTranslate(inState->KCHR, inVKeyCode, &state);
+		/*	Magic for dead keys (combining accent keys) */
+		if (!value) value = KeyTranslate(inState->KCHR, inVKeyCode, &state);
+		
+		charCode = value & 0xFF;
+        }
+#endif
 	
 	/*	Handle the various special cases. There are lots of special cases. */
 	switch (charCode)
@@ -868,20 +927,27 @@ static OSStatus NameOneKey(uint16_t inVKeyCode, CFStringRef *outString, const St
 		{
 			if (inState->uchr)
 			{
+				UniChar			string[kLength];
+				UniCharCount		length;
+
 				/* Use the Unicode key-mapping table to name the key */
+				length = 0;
 				err = UCKeyTranslate(inState->uchr, inVKeyCode, kUCKeyActionDisplay, 0, inState->keyboardType, kUCKeyTranslateNoDeadKeysMask, &state, kLength, &length, string);
 				
 				if (noErr == err) CFStringAppendCharacters(tempStr, string, length);
 			}
-			
+
+#ifdef KEYNAMING_USE_KCHR
 			if (NULL == inState->uchr || noErr != err)
 			{
+				UInt8	pascalString[2];
 				/* Use the old-fashioned charCode + script to name the key */
 				pascalString[0] = 1;
 				pascalString[1] = charCode;
 				
 				CFStringAppendPascalString(tempStr, pascalString, inState->encoding);
 			}
+#endif
 			
 			CFStringUppercase(tempStr, NULL);
 			result = tempStr;
@@ -1015,6 +1081,7 @@ int main(void)
 				CFShow(string);
 				CFRelease(string);
 			}
+			DestroyStateCache(&state);
 		}
 		
 		bcopy(map, oldMap, sizeof map);
