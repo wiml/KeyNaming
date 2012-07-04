@@ -652,7 +652,7 @@ CFStringRef KeyNamingCopyKeyNames(uint32_t inCount, const uint16_t * const inVir
 		CFRelease(curr);
 	}
 	
-	if (err && NULL != result)
+	if (err)
 	{
 		CFRelease(result);
 		result = NULL;
@@ -763,12 +763,6 @@ CFStringRef KeyNamingCopyKeyNamesHID(uint32_t inCount, const int32_t * const inU
 		if (kVKC_Unknown != vkc)
 		{
 			err = NameOneKey(vkc, &curr, &state, NULL);
-			
-			if (err && NULL != curr)
-			{
-				CFRelease(curr);
-				curr = NULL;
-			}
 		} else {
             curr = NULL;
         }
@@ -823,12 +817,6 @@ CFArrayRef KeyNamingCopyKeyNamesAsArrayHID(uint32_t inCount, const int32_t * con
 		if (kVKC_Unknown != vkc)
 		{
 			err = NameOneKey(vkc, &curr, &state, NULL);
-			
-			if (err && NULL != curr)
-			{
-				CFRelease(curr);
-				curr = NULL;
-			}
 		} else {
             curr = NULL;
         }
@@ -856,7 +844,7 @@ CFArrayRef KeyNamingCopyKeyNamesAsArrayHID(uint32_t inCount, const int32_t * con
 
 #endif	/* KEYNAMING_ENABLE_HID */
 
-
+/* Returns noErr on success, or returns an error code and does not update *outString. */
 static OSStatus NameOneKey(uint16_t inVKeyCode, CFStringRef *outString, const StateCache *inState, uint8_t *outHandlingMode)
 {
 	enum { kLength = 255 };
